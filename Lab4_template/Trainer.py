@@ -56,7 +56,7 @@ class kl_annealing():
         # TODO
         return self.beta
 
-    def frange_cycle_linear(self, n_iter, start=0.0, stop=1.0,  n_cycle=1, ratio=1):
+    def frange_cycle_linear(self, start=0.0, stop=1.0):
         # TODO
         mod = (self.current_epoch % self.kl_anneal_cycle)
         diff = (stop-start)* mod /self.kl_anneal_cycle
@@ -115,7 +115,7 @@ class VAE_Model(nn.Module):
             train_loader = self.train_dataloader()
             adapt_TeacherForcing = True if random.random() < self.tfr else False
             total_loss = 0
-            for (img, label) in (pbar := tqdm(train_loader, ncols=120)):
+            for (img, label) in (pbar := tqdm(train_loader, ncols=100)):
                 img = img.to(self.args.device)
                 label = label.to(self.args.device)
                 loss = self.training_one_step(img, label, adapt_TeacherForcing)
@@ -140,7 +140,7 @@ class VAE_Model(nn.Module):
     @torch.no_grad()
     def eval(self):
         val_loader = self.val_dataloader()
-        for (img, label) in (pbar := tqdm(val_loader, ncols=120)):
+        for (img, label) in (pbar := tqdm(val_loader, ncols=160)):
             img = img.to(self.args.device)
             label = label.to(self.args.device)
             loss = self.val_one_step(img, label)
@@ -159,7 +159,7 @@ class VAE_Model(nn.Module):
             if adapt_TeacherForcing:
                 output, mu, logvar = self.forward(last, img[:,i], label[:,i])
                 # use ground truth as the refernece frame
-                last = img[:,i].detach
+                last = img[:,i].detach()
             else:
                 output, mu, logvar = self.forward(last, img[:,i], label[:,i])
                 # use the generated frame as the refernece frame
@@ -278,15 +278,15 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(add_help=True)
-    parser.add_argument('--batch_size',    type=int,    default=8)
+    parser.add_argument('--batch_size',    type=int,    default=2)
     parser.add_argument('--lr',            type=float,  default=0.001,     help="initial learning rate")
     parser.add_argument('--device',        type=str, choices=["cuda", "cpu"], default="cuda")
     parser.add_argument('--optim',         type=str, choices=["Adam", "AdamW"], default="Adam")
     parser.add_argument('--gpu',           type=int, default=1)
     parser.add_argument('--test',          action='store_true')
     parser.add_argument('--store_visualization',      action='store_true', help="If you want to see the result while training")
-    parser.add_argument('--DR',            type=str, default= "../LAB4_Dataset", required=True,  help="Your Dataset Path")
-    parser.add_argument('--save_root',     type=str, default= "../LAB4_Result", required=True,  help="The path to save your data")
+    parser.add_argument('--DR',            type=str, required=True,  help="Your Dataset Path")
+    parser.add_argument('--save_root',     type=str, required=True,  help="The path to save your data")
     parser.add_argument('--num_workers',   type=int, default=4)
     parser.add_argument('--num_epoch',     type=int, default=1,     help="number of total epoch")
     parser.add_argument('--per_save',      type=int, default=1,      help="Save checkpoint every seted epoch")

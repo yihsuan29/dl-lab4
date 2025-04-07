@@ -123,8 +123,12 @@ class Test_model(VAE_Model):
         label_list = []
 
         # TODO
-        raise NotImplementedError
-            
+        img_now = img[0]
+        
+        for i in range(1, 630):
+            label_now = label[i]
+            output = 
+        
         
         # Please do not modify this part, it is used for visulization
         generated_frame = stack(decoded_frame_list).permute(1, 0, 2, 3, 4)
