@@ -20,6 +20,8 @@ import imageio
 import matplotlib.pyplot as plt
 from math import log10
 
+from torch.utils.tensorboard import SummaryWriter
+
 def Generate_PSNR(imgs1, imgs2, data_range=1.):
     """PSNR for torch tensor"""
     mse = nn.functional.mse_loss(imgs1, imgs2) # wrong computation for batch size > 1
@@ -36,19 +38,29 @@ def kl_criterion(mu, logvar, batch_size):
 class kl_annealing():
     def __init__(self, args, current_epoch=0):
         # TODO
-        raise NotImplementedError
+        self.kl_anneal_type = args.kl_anneal_type
+        self.kl_anneal_cycle = args.kl_anneal_cycle
+        self.kl_anneal_ratio = args.kl_anneal_ratio
+        self.current_epoch = current_epoch
+        self.beta = 0.0
         
     def update(self):
         # TODO
-        raise NotImplementedError
+        self.current_epoch+=1
+        if self.kl_anneal_type=="Cyclical":
+            self.beta = self.frange_cycle_linear(start=0.0, stop=1.0)
+        elif self.kl_anneal_type=="Monotonic":
+            self.beta = min(1.0,self.beta+ self.kl_anneal_ratio* self.current_epoch/self.kl_anneal_cycle)
     
     def get_beta(self):
         # TODO
-        raise NotImplementedError
+        return self.beta
 
     def frange_cycle_linear(self, n_iter, start=0.0, stop=1.0,  n_cycle=1, ratio=1):
         # TODO
-        raise NotImplementedError
+        mod = (self.current_epoch % self.kl_anneal_cycle)
+        diff = (stop-start)* mod /self.kl_anneal_cycle
+        return min(1.0, start + self.kl_anneal_ratio* diff)
         
 
 class VAE_Model(nn.Module):
@@ -68,7 +80,7 @@ class VAE_Model(nn.Module):
         self.Generator            = Generator(input_nc=args.D_out_dim, output_nc=3)
         
         self.optim      = optim.Adam(self.parameters(), lr=self.args.lr)
-        self.scheduler  = optim.lr_scheduler.MultiStepLR(self.optim, milestones=[2, 5], gamma=0.1)
+        self.scheduler  = optim.lr_scheduler.MultiStepLR(self.optim, milestones=[2, 100], gamma=0.15)
         self.kl_annealing = kl_annealing(args, current_epoch=0)
         self.mse_criterion = nn.MSELoss()
         self.current_epoch = 0
@@ -82,26 +94,39 @@ class VAE_Model(nn.Module):
         self.val_vi_len   = args.val_vi_len
         self.batch_size = args.batch_size
         
+        self.writer = SummaryWriter(log_dir=self.args.save_root)
         
-    def forward(self, img, label):
-        pass
+        
+    def forward(self,img_ref, img, label, mode = None):
+        img = self.frame_transformation(img)
+        label = self.label_transformation(label)
+        z, mu, logvar = self.Gaussian_Predictor(img, label)
+        # Inference z~N(0,I)
+        if mode == "test":
+            z = torch.randn_like(z)
+        img_ref = self.frame_transformation(img_ref)
+        fusion = self.Decoder_Fusion(img_ref, label, z)
+        output = self.Generator(fusion)
+        return output, mu, logvar
+            
     
     def training_stage(self):
         for i in range(self.args.num_epoch):
             train_loader = self.train_dataloader()
             adapt_TeacherForcing = True if random.random() < self.tfr else False
-            
+            total_loss = 0
             for (img, label) in (pbar := tqdm(train_loader, ncols=120)):
                 img = img.to(self.args.device)
                 label = label.to(self.args.device)
                 loss = self.training_one_step(img, label, adapt_TeacherForcing)
-                
+                total_loss+=loss
                 beta = self.kl_annealing.get_beta()
                 if adapt_TeacherForcing:
                     self.tqdm_bar('train [TeacherForcing: ON, {:.1f}], beta: {}'.format(self.tfr, beta), pbar, loss.detach().cpu(), lr=self.scheduler.get_last_lr()[0])
                 else:
                     self.tqdm_bar('train [TeacherForcing: OFF, {:.1f}], beta: {}'.format(self.tfr, beta), pbar, loss.detach().cpu(), lr=self.scheduler.get_last_lr()[0])
-            
+            print(f"Total loss = {total_loss}")
+            self.writer.add_scalar("Loss/Train", total_loss, self.current_epoch)
             if self.current_epoch % self.args.per_save == 0:
                 self.save(os.path.join(self.args.save_root, f"epoch={self.current_epoch}.ckpt"))
                 
@@ -120,14 +145,46 @@ class VAE_Model(nn.Module):
             label = label.to(self.args.device)
             loss = self.val_one_step(img, label)
             self.tqdm_bar('val', pbar, loss.detach().cpu(), lr=self.scheduler.get_last_lr()[0])
+        print(f'Validation loss: {loss}')  
+        self.writer.add_scalar('Loss/Validation', loss, self.current_epoch)
+          
+            
     
     def training_one_step(self, img, label, adapt_TeacherForcing):
         # TODO
-        raise NotImplementedError
-    
+        loss = 0
+        self.optim.zero_grad()
+        last = img[:,0]
+        for i in range(1, self.train_vi_len):
+            if adapt_TeacherForcing:
+                output, mu, logvar = self.forward(last, img[:,i], label[:,i])
+                # use ground truth as the refernece frame
+                last = img[:,i].detach
+            else:
+                output, mu, logvar = self.forward(last, img[:,i], label[:,i])
+                # use the generated frame as the refernece frame
+                last = output.detach()
+            mse = self.mse_criterion(output, img[:,i])
+            kl = kl_criterion(mu, logvar, self.batch_size) * self.kl_annealing.get_beta()
+            loss += mse + kl
+        loss.backward()
+        self.optimizer_step()
+        return loss
+                             
     def val_one_step(self, img, label):
         # TODO
-        raise NotImplementedError
+        loss = 0
+        with torch.no_grad():
+            last = img[:,0]
+            for i in range(1, self.val_vi_len):
+                output, mu, logvar = self.forward(last, img[:,i], label[:,i], mode = "test")
+                last = output.detach()
+                mse = self.mse_criterion(output, img[:,i])
+                kl = kl_criterion(mu, logvar, self.batch_size)
+                loss += mse + kl
+                self.writer.add_scalar(f"PSNR/{str(self.current_epoch)}", Generate_PSNR(output, img[:,i]),i)
+                
+            return loss
                 
     def make_gif(self, images_list, img_name):
         new_list = []
@@ -170,7 +227,8 @@ class VAE_Model(nn.Module):
     
     def teacher_forcing_ratio_update(self):
         # TODO
-        raise NotImplementedError
+        if self.current_epoch > self.tfr_sde:
+            self.tfr = max(0,self.tfr - self.tfr_d_step)
             
     def tqdm_bar(self, mode, pbar, loss, lr):
         pbar.set_description(f"({mode}) Epoch {self.current_epoch}, lr:{lr}" , refresh=False)
@@ -220,7 +278,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(add_help=True)
-    parser.add_argument('--batch_size',    type=int,    default=2)
+    parser.add_argument('--batch_size',    type=int,    default=8)
     parser.add_argument('--lr',            type=float,  default=0.001,     help="initial learning rate")
     parser.add_argument('--device',        type=str, choices=["cuda", "cpu"], default="cuda")
     parser.add_argument('--optim',         type=str, choices=["Adam", "AdamW"], default="Adam")
@@ -230,8 +288,8 @@ if __name__ == '__main__':
     parser.add_argument('--DR',            type=str, required=True,  help="Your Dataset Path")
     parser.add_argument('--save_root',     type=str, required=True,  help="The path to save your data")
     parser.add_argument('--num_workers',   type=int, default=4)
-    parser.add_argument('--num_epoch',     type=int, default=70,     help="number of total epoch")
-    parser.add_argument('--per_save',      type=int, default=3,      help="Save checkpoint every seted epoch")
+    parser.add_argument('--num_epoch',     type=int, default=1,     help="number of total epoch")
+    parser.add_argument('--per_save',      type=int, default=1,      help="Save checkpoint every seted epoch")
     parser.add_argument('--partial',       type=float, default=1.0,  help="Part of the training dataset to be trained")
     parser.add_argument('--train_vi_len',  type=int, default=16,     help="Training video length")
     parser.add_argument('--val_vi_len',    type=int, default=630,    help="valdation video length")
@@ -246,7 +304,7 @@ if __name__ == '__main__':
     parser.add_argument('--D_out_dim',     type=int, default=192,    help="Dimension of the output in Decoder_Fusion")
     
     # Teacher Forcing strategy
-    parser.add_argument('--tfr',           type=float, default=1.0,  help="The initial teacher forcing ratio")
+    parser.add_argument('--tfr',           type=float, default=0.8,  help="The initial teacher forcing ratio")
     parser.add_argument('--tfr_sde',       type=int,   default=10,   help="The epoch that teacher forcing ratio start to decay")
     parser.add_argument('--tfr_d_step',    type=float, default=0.1,  help="Decay step that teacher forcing ratio adopted")
     parser.add_argument('--ckpt_path',     type=str,    default=None,help="The path of your checkpoints")   
@@ -258,7 +316,7 @@ if __name__ == '__main__':
     
     # Kl annealing stratedy arguments
     parser.add_argument('--kl_anneal_type',     type=str, default='Cyclical',       help="")
-    parser.add_argument('--kl_anneal_cycle',    type=int, default=10,               help="")
+    parser.add_argument('--kl_anneal_cycle',    type=int, default=50,               help="")
     parser.add_argument('--kl_anneal_ratio',    type=float, default=1,              help="")
     
 
