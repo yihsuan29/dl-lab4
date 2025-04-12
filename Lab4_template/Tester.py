@@ -44,7 +44,8 @@ class Dataset_Dance(torchData):
         self.img_folder = []
         self.label_folder = []
         
-        data_num = len(glob('./Demo_Test/*'))
+        # data_num = len(glob('./Demo_Test/*'))
+        data_num = len(glob(os.path.join(root, 'test/test_img/*')))
         for i in range(data_num):
             self.img_folder.append(sorted(glob(os.path.join(root , f'test/test_img/{i}/*')), key=get_key))
             self.label_folder.append(sorted(glob(os.path.join(root , f'test/test_label/{i}/*')), key=get_key))
@@ -87,15 +88,22 @@ class Test_model(VAE_Model):
         self.val_vi_len   = args.val_vi_len
         self.batch_size = args.batch_size
         
+        torch.manual_seed(42)
         
-    def forward(self, img, label):
-        pass     
+    def forward(self, img_ref, label):
+        img_ref = self.frame_transformation(img_ref)
+        label = self.label_transformation(label)
+        z, _, _ = self.Gaussian_Predictor(img_ref, label)
+        z = torch.randn_like(z)
+        fusion = self.Decoder_Fusion(img_ref, label, z)
+        output = self.Generator(fusion)
+        return output
             
     @torch.no_grad()
     def eval(self):
         val_loader = self.val_dataloader()
         pred_seq_list = []
-        for idx, (img, label) in enumerate(tqdm(val_loader, ncols=80)):
+        for idx, (img, label) in enumerate(tqdm(val_loader, ncols=100)):
             img = img.to(self.args.device)
             label = label.to(self.args.device)
             pred_seq = self.val_one_step(img, label, idx)
@@ -123,11 +131,14 @@ class Test_model(VAE_Model):
         label_list = []
 
         # TODO
-        img_now = img[0]
+        img_ref = img[0]
         
         for i in range(1, 630):
             label_now = label[i]
-            output = 
+            output = self.forward(img_ref, label_now)
+            img_ref = output.detach()
+            decoded_frame_list.append(output.cpu())
+            label_list.append(output.cpu())
         
         
         # Please do not modify this part, it is used for visulization
@@ -192,8 +203,8 @@ if __name__ == '__main__':
     parser.add_argument('--no_sanity',     action='store_true')
     parser.add_argument('--test',          action='store_true')
     parser.add_argument('--make_gif',      action='store_true')
-    parser.add_argument('--DR',            type=str, default= "../LAB4_Dataset", required=True,  help="Your Dataset Path")
-    parser.add_argument('--save_root',     type=str, default= "../LAB4_Result", required=True,  help="The path to save your data")
+    parser.add_argument('--DR',            type=str, required=True,  help="Your Dataset Path")
+    parser.add_argument('--save_root',     type=str, required=True,  help="The path to save your data")
     parser.add_argument('--num_workers',   type=int, default=4)
     parser.add_argument('--num_epoch',     type=int, default=70,     help="number of total epoch")
     parser.add_argument('--per_save',      type=int, default=3,      help="Save checkpoint every seted epoch")

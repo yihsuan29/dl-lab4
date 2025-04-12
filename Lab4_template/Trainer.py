@@ -22,6 +22,8 @@ from math import log10
 
 from torch.utils.tensorboard import SummaryWriter
 
+
+
 def Generate_PSNR(imgs1, imgs2, data_range=1.):
     """PSNR for torch tensor"""
     mse = nn.functional.mse_loss(imgs1, imgs2) # wrong computation for batch size > 1
@@ -43,6 +45,8 @@ class kl_annealing():
         self.kl_anneal_ratio = args.kl_anneal_ratio
         self.current_epoch = current_epoch
         self.beta = 0.0
+        if self.kl_anneal_type=="none":
+            self.beta = 1.0
         
     def update(self):
         # TODO
@@ -51,6 +55,7 @@ class kl_annealing():
             self.beta = self.frange_cycle_linear(start=0.0, stop=1.0)
         elif self.kl_anneal_type=="Monotonic":
             self.beta = min(1.0,self.beta+ self.kl_anneal_ratio* self.current_epoch/self.kl_anneal_cycle)
+        
     
     def get_beta(self):
         # TODO
@@ -127,9 +132,13 @@ class VAE_Model(nn.Module):
                     self.tqdm_bar('train [TeacherForcing: OFF, {:.1f}], beta: {}'.format(self.tfr, beta), pbar, loss.detach().cpu(), lr=self.scheduler.get_last_lr()[0])
             print(f"Total loss = {total_loss}")
             self.writer.add_scalar("Loss/Train", total_loss, self.current_epoch)
-            if self.current_epoch % self.args.per_save == 0:
-                self.save(os.path.join(self.args.save_root, f"epoch={self.current_epoch}.ckpt"))
-                
+            self.writer.add_scalar("tfr", self.tfr, self.current_epoch)
+            self.writer.add_scalar("beta", self.kl_annealing.get_beta(), self.current_epoch)
+            
+            
+            # if self.current_epoch % self.args.per_save == 0:
+            #     self.save(os.path.join(self.args.save_root, f"epoch={self.current_epoch}.ckpt"))
+          
             self.eval()
             self.current_epoch += 1
             self.scheduler.step()
@@ -140,7 +149,7 @@ class VAE_Model(nn.Module):
     @torch.no_grad()
     def eval(self):
         val_loader = self.val_dataloader()
-        for (img, label) in (pbar := tqdm(val_loader, ncols=160)):
+        for (img, label) in (pbar := tqdm(val_loader, ncols=100)):
             img = img.to(self.args.device)
             label = label.to(self.args.device)
             loss = self.val_one_step(img, label)
@@ -253,7 +262,7 @@ class VAE_Model(nn.Module):
             self.tfr = checkpoint['tfr']
             
             self.optim      = optim.Adam(self.parameters(), lr=self.args.lr)
-            self.scheduler  = optim.lr_scheduler.MultiStepLR(self.optim, milestones=[2, 4], gamma=0.1)
+            self.scheduler  = optim.lr_scheduler.MultiStepLR(self.optim, milestones=[2, 100], gamma=0.15)
             self.kl_annealing = kl_annealing(self.args, current_epoch=checkpoint['last_epoch'])
             self.current_epoch = checkpoint['last_epoch']
 
@@ -278,7 +287,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(add_help=True)
-    parser.add_argument('--batch_size',    type=int,    default=2)
+    parser.add_argument('--batch_size',    type=int,    default=4)
     parser.add_argument('--lr',            type=float,  default=0.001,     help="initial learning rate")
     parser.add_argument('--device',        type=str, choices=["cuda", "cpu"], default="cuda")
     parser.add_argument('--optim',         type=str, choices=["Adam", "AdamW"], default="Adam")
@@ -288,8 +297,8 @@ if __name__ == '__main__':
     parser.add_argument('--DR',            type=str, required=True,  help="Your Dataset Path")
     parser.add_argument('--save_root',     type=str, required=True,  help="The path to save your data")
     parser.add_argument('--num_workers',   type=int, default=4)
-    parser.add_argument('--num_epoch',     type=int, default=1,     help="number of total epoch")
-    parser.add_argument('--per_save',      type=int, default=1,      help="Save checkpoint every seted epoch")
+    parser.add_argument('--num_epoch',     type=int, default=500,     help="number of total epoch")
+    parser.add_argument('--per_save',      type=int, default=10,      help="Save checkpoint every seted epoch")
     parser.add_argument('--partial',       type=float, default=1.0,  help="Part of the training dataset to be trained")
     parser.add_argument('--train_vi_len',  type=int, default=16,     help="Training video length")
     parser.add_argument('--val_vi_len',    type=int, default=630,    help="valdation video length")
@@ -323,5 +332,11 @@ if __name__ == '__main__':
     
 
     args = parser.parse_args()
+    
+    seed = 42
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
     
     main(args)

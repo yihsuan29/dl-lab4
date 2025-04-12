@@ -77,9 +77,9 @@ class Gaussian_Predictor(nn.Sequential):
         
     def reparameterize(self, mu, logvar):
         # TODO
-        var = torch.exp(logvar*0.5)
-        eps = torch.randn_like(var)
-        z = mu + eps*var
+        stdvar = torch.exp(logvar*0.5)
+        eps = torch.randn_like(stdvar)
+        z = mu + eps*stdvar
         return z
 
     def forward(self, img, label):
